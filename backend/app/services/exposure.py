@@ -1,4 +1,5 @@
 import math
+from datetime import datetime, timezone
 from typing import List, Dict, Any
 
 import httpx
@@ -10,15 +11,29 @@ EXPOSURE_SOURCE = "open-meteo-cams"
 
 
 class ExposureError(Exception):
-    pass
+    """Raised when an air-quality estimate cannot be produced."""
 
 
 class ExposureTimeout(ExposureError):
-    pass
+    """Raised when the air-quality upstream request times out."""
 
 
 class ExposureUpstreamError(ExposureError):
-    pass
+    """Raised when the air-quality upstream service fails."""
+
+
+def _as_of() -> str:
+    """Stamp for the payload: current UTC time, ISO-8601, second precision, 'Z'.
+
+    Every exposure payload shape (success and each failure reason) carries
+    this so the client can render an "as of" time next to the estimate.
+    """
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def _haversine_m(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
@@ -63,6 +78,11 @@ def _sample_points(coords: List[List[float]], max_samples: int = 12, min_spacing
 
 
 def estimate_pm25_route(coords: List[List[float]], total_distance_m: float = 0.0, timeout: int = 10) -> Dict[str, Any]:
+    """Estimate the route's PM2.5 from the CAMS model values at its samples.
+
+    `total_distance_m` is still accepted (callers pass it) but is not used for
+    any weighting: the estimate is the plain mean of the sampled values.
+    """
     samples = _sample_points(coords)
     if len(samples) == 0:
         return {
@@ -72,9 +92,13 @@ def estimate_pm25_route(coords: List[List[float]], total_distance_m: float = 0.0
             "units": "ug/m3",
             "source": EXPOSURE_SOURCE,
             "caveat": "regional model estimate (CAMS) - not street-level; coarse resolution may make values indistinguishable",
+            "as_of": _as_of(),
         }
 
-    # Build query
+    # Build query.
+    # Only "current" is requested: the parser below reads the "current" block
+    # exclusively, so asking for "hourly" as well just made the upstream build
+    # a forecast series nobody consumes.
     lats = [p[1] for p in samples]
     lons = [p[0] for p in samples]
     lat_str = ",".join(f"{x:.4f}" for x in lats)
@@ -82,7 +106,6 @@ def estimate_pm25_route(coords: List[List[float]], total_distance_m: float = 0.0
     params = {
         "latitude": lat_str,
         "longitude": lon_str,
-        "hourly": "pm2_5",
         "current": "pm2_5",
         "timezone": "auto",
     }
@@ -96,6 +119,7 @@ def estimate_pm25_route(coords: List[List[float]], total_distance_m: float = 0.0
             "units": "ug/m3",
             "source": EXPOSURE_SOURCE,
             "caveat": "regional model estimate (CAMS) - not street-level",
+            "as_of": _as_of(),
         }
     except httpx.HTTPError:
         return {
@@ -105,6 +129,7 @@ def estimate_pm25_route(coords: List[List[float]], total_distance_m: float = 0.0
             "units": "ug/m3",
             "source": EXPOSURE_SOURCE,
             "caveat": "regional model estimate (CAMS) - not street-level",
+            "as_of": _as_of(),
         }
     if response.status_code != 200:
         return {
@@ -114,6 +139,7 @@ def estimate_pm25_route(coords: List[List[float]], total_distance_m: float = 0.0
             "units": "ug/m3",
             "source": EXPOSURE_SOURCE,
             "caveat": "regional model estimate (CAMS) - not street-level",
+            "as_of": _as_of(),
         }
     try:
         data = response.json()
@@ -125,6 +151,7 @@ def estimate_pm25_route(coords: List[List[float]], total_distance_m: float = 0.0
             "units": "ug/m3",
             "source": EXPOSURE_SOURCE,
             "caveat": "regional model estimate (CAMS) - not street-level",
+            "as_of": _as_of(),
         }
 
     # Parse - API returns list if multiple points, or dict if single
@@ -154,11 +181,11 @@ def estimate_pm25_route(coords: List[List[float]], total_distance_m: float = 0.0
             "units": "ug/m3",
             "source": EXPOSURE_SOURCE,
             "caveat": "regional model estimate (CAMS) - not street-level",
+            "as_of": _as_of(),
         }
-    if total_distance_m > 0 and len(samples) > 1:
-        mean_val = sum(values) / len(values)
-    else:
-        mean_val = sum(values) / len(values)
+    # Both branches used to be the same expression (no distance weighting was
+    # ever applied), so the mean is computed once.
+    mean_val = sum(values) / len(values)
     value = round(mean_val, 1)
     # Check if all values same (indistinguishable)
     if len(set(values)) == 1 and len(values) > 1:
@@ -175,4 +202,5 @@ def estimate_pm25_route(coords: List[List[float]], total_distance_m: float = 0.0
         "value_variance": values,
         "indistinguishable": indist,
         "caveat": "regional model estimate (CAMS) - not street-level; coarse resolution may make values indistinguishable between nearby routes",
+        "as_of": _as_of(),
     }

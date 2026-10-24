@@ -40,4 +40,4 @@ yarn-error.*
 backend/ecorouter/
 __pycache__/
 *.py[cod]
-backend/services/.env
+backend/.env

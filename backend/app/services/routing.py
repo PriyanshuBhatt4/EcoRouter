@@ -14,15 +14,15 @@ VERIFIED_COSTING = {
 
 
 class RoutingError(Exception):
-    pass
+    """Raised when a route cannot be produced."""
 
 
 class RoutingTimeout(RoutingError):
-    pass
+    """Raised when the routing upstream request times out."""
 
 
 class RoutingUpstreamError(RoutingError):
-    pass
+    """Raised when the routing upstream service fails."""
 
 
 def _haversine_m(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
@@ -38,7 +38,7 @@ def _haversine_m(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
 
 def _decode_polyline6(encoded: str):
     """Decode Valhalla polyline6 (encoded polyline with precision 6) to list of [lon, lat]."""
-    if not encoded:
+    if not isinstance(encoded, str) or not encoded:
         return []
     coords = []
     index = 0
@@ -132,18 +132,27 @@ def get_routes(
     except ValueError as exc:
         raise RoutingUpstreamError("routing service returned invalid JSON") from exc
 
+    # A 200 response must still be a Valhalla object; a bare list/scalar is an
+    # upstream failure (502 envelope), not an AttributeError escaping as 500.
+    if not isinstance(data, dict):
+        raise RoutingUpstreamError("routing service returned an unexpected payload")
+
     candidates = []
 
     def _extract_trip(trip):
-        if not trip:
+        if not isinstance(trip, dict) or not trip:
             return None
         summary = trip.get("summary") or {}
+        if not isinstance(summary, dict):
+            summary = {}
         legs = trip.get("legs") or []
-        if not legs:
+        if not isinstance(legs, list) or not legs:
             return None
         # combine shapes from legs (polyline6)
         all_coords = []
         for leg in legs:
+            if not isinstance(leg, dict):
+                continue
             shape = leg.get("shape") or ""
             if shape:
                 all_coords.extend(_decode_polyline6(shape))
@@ -156,8 +165,11 @@ def get_routes(
             lon_c, lat_c = c[0], c[1]
             if not (-180 <= lon_c <= 180 and -90 <= lat_c <= 90):
                 return None
-        distance_m = (summary.get("length") or 0.0) * 1000.0
-        duration_s = summary.get("time") or 0.0
+        try:
+            distance_m = float(summary.get("length") or 0.0) * 1000.0
+            duration_s = float(summary.get("time") or 0.0)
+        except (TypeError, ValueError):
+            return None
         return {
             "distance_m": distance_m,
             "duration_s": duration_s,
@@ -170,7 +182,15 @@ def get_routes(
         primary["id"] = "route-0"
         candidates.append(primary)
     # alternates
-    for idx, alt in enumerate(data.get("alternates") or []):
+    alternate_trips = data.get("alternates") or []
+    if not isinstance(alternate_trips, list):
+        alternate_trips = []
+    for alt in alternate_trips:
+        # The requested count is a hard cap: it is checked BEFORE an alternate
+        # is appended, so "alternates=0" can never yield a second candidate
+        # (the upstream may still answer with alternates anyway).
+        if len(candidates) >= 1 + alternates:
+            break
         trip = alt.get("trip") if isinstance(alt, dict) else None
         if not trip and isinstance(alt, dict):
             trip = alt
@@ -178,8 +198,6 @@ def get_routes(
         if extracted:
             extracted["id"] = f"route-{len(candidates)}"
             candidates.append(extracted)
-        if len(candidates) >= 1 + alternates:
-            break
 
     if not candidates:
         return None
@@ -200,13 +218,6 @@ def get_routes(
         c1 = candidates[0]["coordinates"][-1]
         snapped_end = [c1[0], c1[1]]
 
-    # validate first/last near requested endpoints
-    if candidates[0].get("coordinates"):
-        first = candidates[0]["coordinates"][0]
-        last = candidates[0]["coordinates"][-1]
-        # rough check - just ensure in range (already validated)
-        pass
-
     candidates[0]["snapped_start"] = snapped_start
     candidates[0]["snapped_end"] = snapped_end
     candidates[0]["start_snap_m"] = start_snap_m
@@ -215,21 +226,4 @@ def get_routes(
         "candidates": candidates,
         "provider": "valhalla_public",
         "provider_note": "Valhalla public server used (prototype only, no SLA).",
-    }
-
-
-# Backward compatible wrapper
-def get_route(*args, **kwargs):
-    res = get_routes(*args, **kwargs)
-    if not res or not res.get("candidates"):
-        return None
-    c = res["candidates"][0]
-    return {
-        "id": c.get("id", "route-0"),
-        "distance_m": c["distance_m"],
-        "duration_s": c["duration_s"],
-        "coordinates": c["coordinates"],
-        "snapped_start": c.get("snapped_start"),
-        "snapped_end": c.get("snapped_end"),
-        "start_snap_m": c.get("start_snap_m"),
     }

@@ -1,0 +1,37 @@
+# Minimal Render Blueprint for the EcoRoute FastAPI backend (free tier).
+#
+# Deploying this file creates a single web service rooted at backend/. There is
+# no Render database addon on purpose: the app boots without DATABASE_URL and
+# /me/* degrades to 503 DB_NOT_CONFIGURED until a Postgres URL is supplied.
+#
+# Every environment variable below is optional and has no default value in this
+# file. Values are entered in the Render dashboard after the Blueprint is
+# created (sync: false); never commit real secrets here.
+services:
+  - type: web
+    name: ecorouter-backend
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      # Postgres connection string (e.g. Supabase). Omit to run DB-less:
+      # /health stays 200 and /me/* returns 503 DB_NOT_CONFIGURED.
+      - key: DATABASE_URL
+        sync: false
+      # Supabase auth: SUPABASE_URL alone derives the issuer and JWKS URL.
+      - key: SUPABASE_URL
+        sync: false
+      # Optional overrides/explicit credentials for token validation.
+      - key: SUPABASE_JWKS_URL
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: SUPABASE_JWT_ISSUER
+        sync: false
+      - key: SUPABASE_JWT_AUDIENCE
+        sync: false
+      - key: SUPABASE_AUDIENCE
+        sync: false

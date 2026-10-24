@@ -7,3 +7,4 @@ sqlalchemy
 psycopg2-binary
 alembic
 python-multipart
+python-dotenv>=1.0,<2
