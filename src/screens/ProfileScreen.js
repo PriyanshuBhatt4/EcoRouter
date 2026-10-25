@@ -5,20 +5,24 @@ import { formatDistance, formatDurationLong, formatTripDate } from '../lib/forma
 import { lifetimeStats, streakCalendar, streakCalendarHeatmap, computeBadges, weekSummary } from '../lib/stats';
 import { DEFAULT_PREFS } from '../constants';
 import { RING_COLORS } from '../theme/palette';
+import { computeMonthLabelPlan, computeContentWidth, WEEKDAY_COL_WIDTH, WEEKDAY_GUTTER, LABEL_ROW_HEIGHT } from '../lib/heatmapLayout';
 import { ScreenHeader, ModePill, StatTile, GhostButton, EmptyState } from '../components/ui';
 
-// Streak-heatmap geometry mirror. The fixed px values live in theme/styles.js
-// (streakCell / streakCol tokens), but that file is a factory function
-// (makeStyles) and cannot export numbers, so the numeric pairs are mirrored
-// here — keep both sides in sync when editing either one:
-//   CELL 13 + GAP 3 = PITCH 16 → 7 rows at 16 = 112px tall (fits on-screen);
-//   ~53 week columns × 16 + 34px weekday column ≈ 880px wide, so the grid is
-//   horizontally scrollable BY DESIGN and never shrinks to fit.
-const STREAK_CELL_SIZE = 13; // styles.streakCell.width / height
-const STREAK_GAP = 3; // styles.streakCell.marginBottom / styles.streakCol.marginRight
-const STREAK_PITCH = STREAK_CELL_SIZE + STREAK_GAP; // 16 — one week column step
-const STREAK_WEEKDAY_COL_WIDTH = 34; // 3-letter weekday label column
-const STREAK_WEEKDAY_GUTTER = 4; // gap between label column and first block
+// Streak-heatmap geometry. The numeric pairs (CELL 13 / GAP 3 / PITCH 16 /
+// weekday col 34 / gutter 4) live in src/lib/heatmapLayout.js, which is
+// imported above — that pure module is the single source of truth; the
+// corresponding style tokens stay in theme/styles.js (streakCell etc.).
+// The CLEARANCE skip rule for month labels also lives there
+// (MONTH_LABEL_MIN_CLEARANCE_PX), so shorter month groups can no longer hand
+// labels a 16–32px box that visually merges 'Oct'/'Nov'.
+//
+// The grid is horizontally scrollable BY DESIGN and never shrinks to fit:
+// theme/styles.js keeps every tile at its true 13×13 px and the surrounding
+// ScrollView simply CLIPS beyond the viewport (with a visible horizontal
+// scroll indicator for discoverability) — no tile shrink-to-fit anywhere.
+// Both the label row and the grid carry the SAME explicit pixel width from
+// computeContentWidth(heat, true), so the two rows can never truncate
+// independently at the ScrollView's content edge.
 
 // Row labels for the 7 fixed weekday rows (index 0 = Sunday .. 6 = Saturday,
 // matching streakCalendarHeatmap's slot layout).
@@ -68,6 +72,12 @@ export default function ProfileScreen({
   const ring = streakCalendar(trips);
   const ringColors = isDark ? RING_COLORS.dark : RING_COLORS.light;
   const heatmap = streakCalendarHeatmap(trips);
+  // Heatmap layout plan: label x positions (with the deterministic
+  // clearance skip rule) and the shared explicit content width for BOTH the
+  // month label row and the grid assembly — derived from the same heatmap
+  // value, so the two rows can never truncate independently.
+  const monthLabelPlan = computeMonthLabelPlan(heatmap);
+  const heatmapContentWidth = computeContentWidth(heatmap, true);
 
   return (
     <View style={styles.container}>
@@ -221,32 +231,43 @@ export default function ProfileScreen({
             // Brand-new user: honest empty state, no fabricated activity.
             <Text style={styles.streakSubline}>Complete trips to start building your streak.</Text>
           )}
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.streakGridScroll}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={true}
+            style={styles.streakGridScroll}
+            // Explicit pixel content width (same plan as below) — the scroll
+            // viewport clips the yearly layout by design; no shrink-to-fit.
+            contentContainerStyle={{ width: heatmapContentWidth }}
+          >
             <View>
-              {/* Month labels: one per month-group block, each label box
-                  spans weeks × pitch so it sits exactly over its block. */}
+              {/* Month labels: absolutely positioned at the planned x (with
+                  the shared clearance skip rule), inside ONE row that carries
+                  the full explicit content width. Labels can no longer run
+                  together: every onset is ≥ MONTH_LABEL_MIN_CLEARANCE_PX from
+                  the last rendered one, and any skipped month is skipped
+                  identically on every render because the plan is pure. */}
               <View
                 style={[
                   styles.streakMonthsRow,
-                  { marginLeft: STREAK_WEEKDAY_COL_WIDTH + STREAK_WEEKDAY_GUTTER },
+                  { width: heatmapContentWidth, height: LABEL_ROW_HEIGHT },
                 ]}
               >
-                {heatmap.months.map((m) => (
+                {monthLabelPlan.labels.map(({ label, x }) => (
                   <Text
-                    key={`month-${m.startKey}`}
-                    style={[styles.streakMonthLabel, { width: m.weeks.length * STREAK_PITCH }]}
+                    key={`month-${label}-${x}`}
+                    style={[styles.streakMonthLabel, { position: 'absolute', left: x }]}
                   >
-                    {m.label}
+                    {label}
                   </Text>
                 ))}
               </View>
-              <View style={styles.streakGrid}>
+              <View style={[styles.streakGrid, { width: heatmapContentWidth }]}>
                 {/* Weekday label column: 7 rows sharing the exact cell pitch
                     (height 13 + marginBottom 3 in the tokens). */}
                 <View
                   style={[
                     styles.streakWeekdayCol,
-                    { width: STREAK_WEEKDAY_COL_WIDTH, marginRight: STREAK_WEEKDAY_GUTTER },
+                    { width: WEEKDAY_COL_WIDTH, marginRight: WEEKDAY_GUTTER },
                   ]}
                 >
                   {STREAK_WEEKDAYS.map((label) => (

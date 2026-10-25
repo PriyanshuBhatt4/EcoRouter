@@ -378,16 +378,52 @@ describe('Screens smoke test', () => {
     );
     expect(cellNodes.length).toBeGreaterThan(0);
 
-    // The 7 fixed weekday rows are labeled, and the month label row covers at
-    // least two month groups (a 365-day window always straddles >= 2 months,
-    // so this holds for every date — still no live-clock value asserted).
+    // The 7 fixed weekday rows are labeled. The month labels are structural
+    // only: the rendered plan is always ≥ 1 (the first group never skips),
+    // the clearance skip rule may drop short window-start followers, and a
+    // 13-month year window does repeat one month name at both ends (Oct 2025
+    // … Oct 2026) — so the invariant is that every ADJACENT rendered pair
+    // differs (no month printed twice in a row), never a global unique set.
     for (const day of ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']) {
       expect(getByText(day)).toBeTruthy();
     }
     const monthLabels = root.queryAll((inst) =>
       flattenStyle(inst.props.style ?? {}).includes(styles.streakMonthLabel)
     );
-    expect(monthLabels.length).toBeGreaterThanOrEqual(2);
+    expect(monthLabels.length).toBeGreaterThanOrEqual(1);
+    const labelTexts = monthLabels.map((n) => n.props.children);
+    for (let i = 1; i < labelTexts.length; i++) {
+      expect(labelTexts[i]).not.toBe(labelTexts[i - 1]);
+    }
+
+    // Explicit-width contract: the month-label row and the grid assembly
+    // each carry a numeric pixel width style and the two values are EQUAL —
+    // both come from the same computeContentWidth(heat, true) plan, so the
+    // rows can never truncate independently at the scroll content edge
+    // (regression guard for the right-edge clipping report). Scan style the
+    // same lean way as above (queryAll + flattened style array).
+    const monthsRowNodes = scrollMatches[0].queryAll((inst) =>
+      flattenStyle(inst.props.style ?? {}).includes(styles.streakMonthsRow)
+    );
+    const gridNodes = scrollMatches[0].queryAll((inst) =>
+      flattenStyle(inst.props.style ?? {}).includes(styles.streakGrid)
+    );
+    expect(monthsRowNodes.length).toBe(1);
+    expect(gridNodes.length).toBe(1);
+    const explicitWidth = (node) => {
+      const entries = flattenStyle(node.props.style ?? {}).filter(
+        (s) => s && typeof s === 'object' && typeof s.width === 'number'
+      );
+      expect(entries.length).toBeGreaterThan(0);
+      return entries.map((e) => e.width);
+    };
+    const rowWidths = explicitWidth(monthsRowNodes[0]);
+    const gridWidths = explicitWidth(gridNodes[0]);
+    expect(rowWidths).toHaveLength(1);
+    expect(gridWidths).toHaveLength(1);
+    expect(rowWidths[0]).toBe(gridWidths[0]);
+    // Positive, plausible year-window width (38px chrome minimum).
+    expect(rowWidths[0]).toBeGreaterThan(38);
 
     // Legend is fully static (all five swatches render always), so every
     // label is present regardless of trip data or the current date.

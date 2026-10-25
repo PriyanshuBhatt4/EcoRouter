@@ -535,7 +535,20 @@ export function makeStyles(t) {
     streakTileLabel: { fontSize: 11, color: t.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 4, lineHeight: 15 },
     streakSubline: { fontSize: 11, color: t.textSecondary, marginTop: 10, lineHeight: 15 },
     streakGridScroll: { marginTop: 12 },
+    // NOTE: the grid is horizontally scrollable BY DESIGN — the ScrollView in
+    // ProfileScreen CLIPS beyond the viewport (with a visible horizontal
+    // scroll indicator) and the tiles are never shrunk to fit it. Every tile
+    // below keeps its true square geometry: width === height === 13, radius
+    // 3 as-is, one 3px margin per column = week pitch 16 (see
+    // src/lib/heatmapLayout.js, which owns the actual numeric constants).
+    // streakMonthsRow: one full-content-width row of absolutely positioned
+    // month labels (explicit width + LABEL_ROW_HEIGHT=14 come from the
+    // heatmapLayout helper in ProfileScreen, not from a per-label box), with
+    // the clearance skip rule preventing 'Oct'/'Nov'-style run-together.
     streakMonthsRow: { flexDirection: 'row', marginBottom: 4 },
+    // Month label at fontSize 10 (readability vs the 9px weekday labels,
+    // which stay at 9; row alignment reaffirmed via matching height/lineHeight
+    // to the 13px cell row baseline). lineHeight 14 === LABEL_ROW_HEIGHT.
     streakMonthLabel: { fontSize: 10, color: t.textTertiary, lineHeight: 14 },
     streakGrid: { flexDirection: 'row' },
     streakWeekdayCol: { justifyContent: 'flex-start' },
