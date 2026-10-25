@@ -5,7 +5,7 @@ import * as Location from 'expo-location';
 import * as ImagePicker from 'expo-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { PREFERENCES, selectByPreference } from './lib/preferences';
-import { tripStep } from './lib/track';
+import { createTripDistanceAccountant, distanceStep, finishTripDistance, tripStep } from './lib/track';
 import { fetchRouteCandidates, fetchWithTimeout } from './services/api';
 import MapScreen from './screens/MapScreen';
 import ProfileScreen from './screens/ProfileScreen';
@@ -67,6 +67,12 @@ export default function App() {
   const [tripElapsed, setTripElapsed] = useState(0);
   const [tripDistance, setTripDistance] = useState(0);
   const [lowAccuracyActive, setLowAccuracyActive] = useState(false);
+  // Distance-pause flag (ADDITIVE): true while consecutive low-accuracy fixes
+  // (>= LOW_ACCURACY_PAUSE_FIXES below) say GPS is too unreliable to accept
+  // trusted steps, so the windowed accountant's pending meters cannot be
+  // decided honestly. Display-only honesty: the trip filter itself, the
+  // low-accuracy warning and the marker are untouched.
+  const [distancePaused, setDistancePaused] = useState(false);
   const [userPos, setUserPos] = useState(null);
   const [followUser, setFollowUser] = useState(true);
   // Latest-value mirror of followUser for the long-lived trip position
@@ -145,6 +151,21 @@ export default function App() {
   // accepted fix arrives. Filtering decisions live in lib/track.js.
   const tripFilterRef = useRef(null);
   const tripDistanceRef = useRef(0);
+  // Windowed trip-distance accountant (see lib/track.js distanceStep): holds
+  // back accepted 'ok' meters until a ~50 m window's NET displacement proves
+  // it is real travel rather than an indoor standing-still random walk.
+  // tripDistanceRef mirrors its decidedMeters so every existing read of the
+  // mirror keeps the same semantics; finishTrip consults the accountant's
+  // remaining-window decision for the final (honest, possibly smaller)
+  // figure. Pure module state — no timers, no storage.
+  const distanceAccountantRef = useRef(createTripDistanceAccountant());
+  // Consecutive rejected low-accuracy fixes (resets on any quality 'ok'
+  // fix). Reaching the pause threshold flips distancePaused so the trip card
+  // can honestly say the distance readout is paused while GPS is unreliable.
+  const consecutiveLowAccuracyRef = useRef(0);
+  // Last trusted accept pair ({ prev, cur }): the prev/cur of the previously
+  // accepted 'ok' fix, for finishTrip's final accountant decision.
+  const lastTrustedPairRef = useRef(null);
   // Journey Replay trail (ADDITIVE side-car, observational only): the stream
   // of ACCEPTED fixes retained while tracking, thinned by TRAIL_MIN_STEP_M.
   // Never part of distance calculation — tripDistanceRef above stays the sole
@@ -173,6 +194,17 @@ export default function App() {
   // so a same-frame double-tap cannot save two identical records (the second
   // call's `trips` closure does not contain the first record yet).
   const tripActiveRef = useRef(false);
+  // PM2.5 capture for the active trip (ADDITIVE): the raw `value` of the
+  // selected route's pm25_estimate at Start Trip, exactly as the backend
+  // payload carried it into the candidate (no rounding applied here — same
+  // figure the PM estimate card showed). Null when there were no candidates,
+  // no usable selection, or the estimate was unavailable/non-finite (old
+  // behavior — nothing was stored then, either). A ref mirror (like
+  // tripDistanceRef) so finishTrip reads the value captured at trip start
+  // without a re-read of the ACTIVE_TRIP_KEY record that stores the same
+  // field; both stay absent/null for trips without an estimate, keeping the
+  // record shape backward-compatible with all pre-existing trips.
+  const plannedPm25Ref = useRef(null);
   // Erase-all epoch: doEraseAll bumps it; a search whose fetch was in flight
   // during the erase completes afterwards but MUST NOT apply its results
   // (or push a recent destination) onto the freshly-erased state/storage.
@@ -454,7 +486,14 @@ export default function App() {
         locationSubRef.current = null;
       }
       tripDistanceRef.current = 0;
+      // Same reset family as the distance mirror: the accountant's pending
+      // window is discarded with the trip (fresh shape, nothing carried).
+      distanceAccountantRef.current = createTripDistanceAccountant();
+      lastTrustedPairRef.current = null;
+      consecutiveLowAccuracyRef.current = 0;
+      setDistancePaused(false);
       tripFilterRef.current = null;
+      plannedPm25Ref.current = null;
       trailRef.current = [];
       setTripActive(false);
       setTripStartTime(null);
@@ -801,6 +840,10 @@ export default function App() {
     setTripDistance(0);
     setTripDetailsExpanded(false);
     tripDistanceRef.current = 0;
+    distanceAccountantRef.current = createTripDistanceAccountant();
+    lastTrustedPairRef.current = null;
+    consecutiveLowAccuracyRef.current = 0;
+    setDistancePaused(false);
     tripFilterRef.current = null;
     // Mirror the reference/distance cleanup for the replay trail: a fresh
     // trip starts with an EMPTY path (the first accepted fix becomes its
@@ -808,8 +851,26 @@ export default function App() {
     trailRef.current = [];
     setLowAccuracyActive(false);
     setFollowUser(true);
+    // PM2.5 capture (ADDITIVE): read the SELECTED route in App state directly
+    // (`primary` — the selectedId candidate, falling back to the first, whose
+    // Start Trip card is the one on screen; MapScreen's props contract stays
+    // untouched). A record gains plannedPm25 only when the backend marked the
+    // estimate available AND the value is a finite number; otherwise the
+    // field is absent (null mirror) and both storage keys behave exactly as
+    // they did before. Raw value — the same number the PM card displayed.
+    const pmEstimate = primary && primary.pm25_estimate;
+    const plannedPm25 =
+      pmEstimate &&
+      pmEstimate.available === true &&
+      typeof pmEstimate.value === 'number' &&
+      Number.isFinite(pmEstimate.value)
+        ? pmEstimate.value
+        : null;
+    plannedPm25Ref.current = plannedPm25;
     try {
-      await AsyncStorage.setItem(ACTIVE_TRIP_KEY, JSON.stringify({ startedAt: Date.now(), mode }));
+      const activeRecord = { startedAt: Date.now(), mode };
+      if (plannedPm25 !== null) activeRecord.plannedPm25 = plannedPm25;
+      await AsyncStorage.setItem(ACTIVE_TRIP_KEY, JSON.stringify(activeRecord));
     } catch {}
     if (locationSubRef.current) {
       try { locationSubRef.current.remove(); } catch {}
@@ -818,36 +879,58 @@ export default function App() {
       const subscription = await Location.watchPositionAsync(
         { accuracy: Location.Accuracy.BestForNavigation, timeInterval: 2000, distanceInterval: 5 },
         (pos) => {
-          const p = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
-          setUserPos(p);
-          // followUser via the ref (not the captured state): this callback is
-          // registered once per trip, and the state it closes over would be
-          // stale — panning the map (setFollowUser(false)) must stop the
-          // camera re-centering on every subsequent fix.
-          if (followUserRef.current && mapRef.current) {
-            try {
-              mapRef.current.animateCamera({ center: p, zoom: 17 }, { duration: 400 });
-            } catch {}
-          }
-          // Distance filtering: compare the raw fix against the current
-          // TRUSTED reference (not the previous raw reading) via lib/track.
+          // Distance filtering runs FIRST and drives everything below: the
+          // displayed marker and the follow-camera may move ONLY for fixes
+          // the filter TRUSTS. (Previously the raw fix moved marker/camera
+          // before the verdict, so low-accuracy noise and rejected jumps
+          // visibly dragged the trip pin and the map around.)
           // prev comes from tripFilterRef, so its accuracy is always that of
-          // an already-accepted fix.
+          // an already-accepted fix. Captured BEFORE the reference advances:
+          // the accountant also needs the pair that produced the step.
+          const prevFix = tripFilterRef.current;
           const cur = {
             latitude: pos.coords.latitude,
             longitude: pos.coords.longitude,
             accuracy: pos.coords?.accuracy,
             timestamp: pos.timestamp,
           };
-          const step = tripStep(tripFilterRef.current, cur);
-          if (tripFilterRef.current == null || step.quality === 'ok') {
-            // Accept: advance the trusted reference (and accumulate distance
-            // once a reference exists — the first fix is reference-only).
-            if (tripFilterRef.current) {
-              tripDistanceRef.current += step.meters;
-              setTripDistance(tripDistanceRef.current);
+          const step = tripStep(prevFix, cur);
+          if (prevFix == null || step.quality === 'ok') {
+            // TRUSTED accept arm. The first fix (no reference yet) is a
+            // reference-only accept QUALIFYING for display too — tripStep
+            // returns quality 'ok' for it regardless of accuracy, so marker
+            // and camera track the filter verdict exactly, including for the
+            // very first fix of a trip.
+            const p = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
+            setUserPos(p);
+            // followUser via the ref (not the captured state): this callback is
+            // registered once per trip, and the state it closes over would be
+            // stale — panning the map (setFollowUser(false)) must stop the
+            // camera re-centering on every subsequent fix.
+            if (followUserRef.current && mapRef.current) {
+              try {
+                mapRef.current.animateCamera({ center: p, zoom: 17 }, { duration: 400 });
+              } catch {}
+            }
+            // Accumulate distance once a reference exists (the first fix is
+            // reference-only, meters 0). ADDITIVE windowed accounting: the
+            // step's meters are held in the accountant's pending window and
+            // only count when the window's NET displacement proves real
+            // travel (see lib/track.js windowed accountant header) — an
+            // indoor standing-still random walk ends up discarded. The
+            // display shows decidedMeters: honest lag of at most
+            // TRIP_FILTER.DISTANCE_COMMIT_MIN_M (50 m) until the next window
+            // lands or finishTrip commits the remainder.
+            if (prevFix) {
+              const account = distanceStep(distanceAccountantRef.current, step, prevFix, cur);
+              distanceAccountantRef.current = account.state;
+              tripDistanceRef.current = account.state.decidedMeters;
+              if (account.added) {
+                setTripDistance(account.state.decidedMeters);
+              }
             }
             tripFilterRef.current = cur;
+            lastTrustedPairRef.current = { prev: prevFix, cur };
             // ADDITIVE trail retention (journey replay side-car). Mirrors the
             // accept decision: the accepted fix may join the trail when the
             // first sample (no last yet) or far enough (TRAIL_MIN_STEP_M,
@@ -861,15 +944,30 @@ export default function App() {
               trail.push({ latitude: cur.latitude, longitude: cur.longitude });
             }
           } else if (step.quality === 'low_accuracy' || step.quality === 'jitter') {
-            // UNTRUSTED/JITTER: keep the previous trusted reference so accumulated
-            // drift never erases or inflates real movement measured later.
-            // (no reference update, no distance added)
+            // UNTRUSTED/JITTER: keep the previous trusted reference. The
+            // displayed marker/camera also stay on the last TRUSTED fix
+            // (no reference update, no distance, no marker/camera move).
           } else if (step.quality === 'jump') {
-            // Impossible jump (bad fix or teleport): re-sync reference, add nothing.
-            // The trail deliberately does NOT take the jumped-to fix: it is a
-            // rejected position, not traveled ground — adding it would draw a
-            // fabricated straight segment across the replayed path.
+            // Impossible jump (bad fix or teleport): re-sync the filter
+            // reference to the rejected position so later real fixes measure
+            // from there, but do NOT move the displayed marker/camera to it —
+            // it is rejected ground, not traveled ground (the trail must not
+            // take it either, or a fabricated straight segment would appear).
+            // The marker resumes moving on the next TRUSTED fix only.
             tripFilterRef.current = cur;
+          }
+          // ADDITIVE distance-pause tracking: TWO consecutive low-accuracy
+          // fixes pause the DISTANCE readout (MapScreen shows an honest
+          // caption while this flag is up). jitter/jump leave it untouched,
+          // any quality 'ok' fix resets it. Deliberately separate from
+          // lowAccuracyActive below, which keeps its own single-fix notice
+          // behavior untouched.
+          if (step.quality === 'low_accuracy') {
+            consecutiveLowAccuracyRef.current += 1;
+            setDistancePaused(consecutiveLowAccuracyRef.current >= 2);
+          } else if (step.quality === 'ok') {
+            consecutiveLowAccuracyRef.current = 0;
+            setDistancePaused(false);
           }
           setLowAccuracyActive(step.lowAccuracy);
         }
@@ -940,7 +1038,22 @@ export default function App() {
     tripActiveRef.current = false;
     const end = Date.now();
     const elapsedSec = tripStartTime ? (end - tripStartTime) / 1000 : tripElapsed;
-    const distM = tripDistanceRef.current;
+    // Final distance from the WINDOWED ACCOUNTANT (network truth, not the
+    // raw path sum): decidedMeters already cover every committed window and
+    // finishTripDistance decides the remaining queue regardless of size —
+    // a real short final leg commits (ratio ≈ 1), a drift-dominated one is
+    // discarded (ratio ≈ 0). A trip where standing-still drift dominated
+    // therefore ends with an honestly SMALLER number than the old path sum.
+    // lastTrustedPairRef carries the last accepted fix pair (prev captured
+    // before the reference advanced); tripFilterRef stays the last accepted
+    // fix until the resets below.
+    const finishAccount = finishTripDistance(
+      distanceAccountantRef.current,
+      lastTrustedPairRef.current ? lastTrustedPairRef.current.prev : null,
+      tripFilterRef.current
+    );
+    const distM = finishAccount.meters;
+    tripDistanceRef.current = distM;
     if (locationSubRef.current) {
       try { locationSubRef.current.remove(); } catch {}
       locationSubRef.current = null;
@@ -952,6 +1065,15 @@ export default function App() {
       actualDistanceM: distM,
       durationSec: elapsedSec,
     };
+    // Carried from the active trip (see plannedPm25Ref): present only when a
+    // usable PM2.5 estimate was captured at Start Trip. Re-validated here so
+    // a stale/mis-shaped mirror can never write a non-finite field; old
+    // records (and estimate-less new trips) simply keep omitting the field.
+    const plannedPm25 = plannedPm25Ref.current;
+    if (typeof plannedPm25 === 'number' && Number.isFinite(plannedPm25)) {
+      trip.plannedPm25 = plannedPm25;
+    }
+    plannedPm25Ref.current = null;
     // Trip record FIRST (shape untouched), then the side-car trail — a
     // failed trail write must never lose or delay the trip record.
     const updated = [trip, ...trips];
@@ -964,6 +1086,13 @@ export default function App() {
     setTripStartTime(null);
     setTripElapsed(0);
     setLowAccuracyActive(false);
+    setDistancePaused(false);
+    consecutiveLowAccuracyRef.current = 0;
+    // Same reset family as tripDistance/tripFilter (handled at the next
+    // startTrip): clear the accountant's pending window and last accepted
+    // pair so nothing can leak into a future trip.
+    distanceAccountantRef.current = createTripDistanceAccountant();
+    lastTrustedPairRef.current = null;
     setTripDetailsExpanded(false);
   };
 
@@ -1526,6 +1655,11 @@ export default function App() {
       primary={primary}
       mapRef={mapRef}
       location={location}
+      // Raw request origin + accuracy captured by acquireOrigin (the same
+      // fix the route request consumed); MapScreen uses these only for the
+      // dashed route-start connector representation — no route state changes.
+      currentCoords={currentCoords}
+      currentAccuracy={currentAccuracy}
       locationError={locationError}
       locationBannerDismissed={locationBannerDismissed}
       setLocationBannerDismissed={setLocationBannerDismissed}
@@ -1558,6 +1692,7 @@ export default function App() {
       tripElapsed={tripElapsed}
       tripDistance={tripDistance}
       lowAccuracyActive={lowAccuracyActive}
+      distancePaused={distancePaused}
       tripDetailsExpanded={tripDetailsExpanded}
       setTripDetailsExpanded={setTripDetailsExpanded}
       distUnit={distUnit}

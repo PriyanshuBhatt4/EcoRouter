@@ -34,13 +34,16 @@ function accumulateKcal(trip, weightKg) {
   return met * weightKg * hours;
 }
 
-// FUTURE-COMPAT: saved trips today carry NO air-quality data, so
-// exposureUgM3 is null and the UI shows "Not available". If a future record
-// gains a pm25 / pm25Estimate / exposureUgM3 field (a finite number), the
-// plain MEAN of the values present is exposed (no duration weighting). Units
-// are the caller's concern for display.
+// Air figure per trip: completed trips written since the PM-capture milestone
+// carry `plannedPm25` — the RAW value of the selected planned route's
+// pm25_estimate at trip start (only present when the backend marked the
+// estimate available and the value was finite; the App handler re-validates
+// on both write paths). The older future-compat keys below still count for
+// any legacy/experimental records, so the plain MEAN of the values PRESENT
+// is exposed (no duration weighting). Units are the caller's concern for
+// display; a trip without any finite air field is simply excluded.
 function tripAirValue(trip) {
-  for (const key of ['pm25', 'pm25Estimate', 'exposureUgM3']) {
+  for (const key of ['pm25', 'pm25Estimate', 'exposureUgM3', 'plannedPm25']) {
     const v = trip[key];
     if (typeof v === 'number' && Number.isFinite(v)) return v;
   }
@@ -189,6 +192,78 @@ export function streakCalendar(trips, now = new Date()) {
   }
 
   return { cells, currentStreak, longestStreak, firstTripDate };
+}
+
+// ---------------------------------------------------------------------------
+// Streak heatmap layout (Profile contribution grid). PURE presentation mapping
+// over streakCalendar's cells — it derives no data of its own and never reads
+// the clock (`now` is injectable exactly like streakCalendar's). Counts come
+// from REUSING streakCalendar(trips, now) internally, so heatmap tiles can
+// never disagree with the streak tiles or badges.
+// ---------------------------------------------------------------------------
+
+// Short month labels via a local const array — no Intl/locale dependency, so
+// labels are identical on every device and JS engine.
+const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// Returns { months: [{ label, startKey, weeks: [cell|null × 7] }, ...] }.
+// Rows are the 7 weekdays, index 0 = Sunday .. 6 = Saturday, read from each
+// day key with a LOCAL Date getDay(); columns are calendar weeks in order.
+// The leading partial week extends BACK to the window's Sunday (pre-window
+// slots are null), trailing future days (after today) are null, and every one
+// of the 365 real cells is the EXACT object streakCalendar produced —
+// key/count/level/inHistory untouched, no re-derivation.
+//
+// All date work is Y/M/D local arithmetic (the same shape shiftDayKey uses —
+// the Date constructor normalizes the rollover), so leap days and month/year
+// boundaries roll over exactly like the streak grid does; deliberately NO
+// raw-millisecond stepping anywhere in this mapping.
+export function streakCalendarHeatmap(trips, now = new Date()) {
+  const ring = streakCalendar(trips, now);
+  if (ring.cells.length === 0) return { months: [] };
+
+  // Weekday (0 = Sunday) of a 'YYYY-MM-DD' key, parsed through local Date
+  // construction.
+  const weekdayOfKey = (key) => {
+    const p = key.split('-');
+    return new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2])).getDay();
+  };
+
+  const firstDow = weekdayOfKey(ring.cells[0].key);
+  const lastDow = weekdayOfKey(ring.cells[ring.cells.length - 1].key);
+
+  // Full padded slot list: nulls back to the window's Sunday, the 365 real
+  // cells, then future-day nulls padding the final week up to row 6. (first
+  // pad + 365 + last pad is always 371 = 53 × 7, because the window spans a
+  // whole number of weeks from Sunday to the same weekday.)
+  const slots = new Array(firstDow).fill(null).concat(ring.cells);
+  for (let pad = lastDow + 1; pad <= 6; pad++) slots.push(null);
+
+  // Chunk the slot list into fixed 7-slot week columns.
+  const weeks = [];
+  for (let i = 0; i < slots.length; i += 7) weeks.push(slots.slice(i, i + 7));
+
+  // Month binning: a week column belongs to the month of its middle day
+  // (row 3, Wednesday) — deterministic for straddling weeks. At the padded
+  // edges that slot can be null (first column before the window starts / last
+  // column after today); the column's first real cell then carries the bin.
+  const monthIndexOfWeek = (week) => {
+    const middle = week[3] || week.find((c) => c !== null);
+    return Number(middle.key.split('-')[1]) - 1;
+  };
+
+  const months = [];
+  for (const week of weeks) {
+    const label = MONTH_LABELS[monthIndexOfWeek(week)];
+    const last = months[months.length - 1];
+    if (last && last.label === label) {
+      last.weeks.push(week);
+    } else {
+      months.push({ label, startKey: week.find((c) => c !== null).key, weeks: [week] });
+    }
+  }
+
+  return { months };
 }
 
 export { MET_BY_MODE };

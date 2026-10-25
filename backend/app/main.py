@@ -3,6 +3,7 @@ from datetime import datetime
 import json
 import logging
 import math
+import time
 
 # Environment variables come from backend/.env (anchored in app/config.py).
 try:
@@ -257,27 +258,64 @@ def create_route(request: RouteRequest):
 
     candidates = routes_res["candidates"]
 
+    # Exposure section budget: total time budget for ALL exposure calls in this
+    # request. Chosen to keep end-to-end under the client's 15s abort.
+    # Worst-case math (sequential): geocode timeout ~10s (geocoding.httpx timeout=10)
+    # + routing timeout ~15s (routing.httpx timeout=15) = up to ~25s if both hit
+    # timeouts before reaching this point; however timeouts are mapped to early
+    # 504/502 responses and never reach exposure. On success paths, geocode is
+    # fast or skipped (saved coords) and routing is fast/within its timeout; the
+    # exposure calls are the only uncoordinated long tail after routing. Section
+    # cap EXPO_SECTION_BUDGET_S = 4.0s (client 15s abort - geocode/routing
+    # worst-case must stay under; if geocode+routing can exceed 12s in practice
+    # the client timeout needs raising - frontend task). Per-candidate cap
+    # EXPO_PER_CANDIDATE_CAP_S = 2.0s; when remaining budget <= EXPO_BUDGET_FLOOR_S
+    # we skip the call entirely and return unavailable with reason
+    # 'exposure budget expired' (shape consistent with other unavailable branches,
+    # includes 'as_of').
+    EXPO_SECTION_BUDGET_S = 4.0
+    EXPO_PER_CANDIDATE_CAP_S = 2.0
+    EXPO_BUDGET_FLOOR_S = 0.0
+    expo_deadline = time.monotonic() + EXPO_SECTION_BUDGET_S
+
     enriched_candidates = []
     for c in candidates:
         coords = c.get("coordinates") or []
         dist_m = c.get("distance_m") or 0.0
-        try:
-            exp = estimate_pm25_route(coords, total_distance_m=dist_m, timeout=10)
-        except Exception:
-            # Defensive fallback: same payload shape as the service, including
-            # the "as of" stamp, so the client can always render a timestamp.
-            # The failure itself is logged (never sent to the client) so a
-            # broken exposure service is not invisible in production.
-            logger.exception("PM2.5 exposure estimation failed for a route candidate")
+        remaining = expo_deadline - time.monotonic()
+        if remaining <= EXPO_BUDGET_FLOOR_S:
             exp = {
                 "available": False,
-                "reason": "exception",
+                "reason": "exposure budget expired",
                 "metric": "pm2_5",
                 "units": "ug/m3",
                 "source": "open-meteo-cams",
-                "caveat": "regional model estimate (CAMS) - not street-level; estimate unavailable",
+                "caveat": "regional model estimate (CAMS) - not street-level",
                 "as_of": _as_of(),
             }
+        else:
+            per_cand_timeout = min(EXPO_PER_CANDIDATE_CAP_S, remaining)
+            # never exceed per-candidate cap in effect; also ensure it's reasonable
+            if per_cand_timeout < 0:
+                per_cand_timeout = 0
+            try:
+                # estimate_pm25_route accepts int timeout in practice; pass float is ok
+                exp = estimate_pm25_route(coords, total_distance_m=dist_m, timeout=per_cand_timeout)
+            except Exception:
+                # Defensive fallback: same payload shape as the service, including
+                # the "as of" stamp, so the client can always render a timestamp.
+                # The failure itself is logged (never sent to the client) so a
+                # broken exposure service is not invisible in production.
+                logger.exception("PM2.5 exposure estimation failed for a route candidate")
+                exp = {
+                    "available": False,
+                    "reason": "exception",
+                    "metric": "pm2_5",
+                    "units": "ug/m3",
+                    "source": "open-meteo-cams",
+                    "caveat": "regional model estimate (CAMS) - not street-level; estimate unavailable",
+                    "as_of": _as_of(),
+                }
         c_out = dict(c)
         c_out["pm25_estimate"] = exp
         enriched_candidates.append(c_out)

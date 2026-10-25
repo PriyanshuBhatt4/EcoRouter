@@ -159,6 +159,30 @@ describe('fetchWithTimeout passthrough via the stubbed fetch', () => {
     const res = await fetchWithTimeout('http://test.host/route');
     expect(res).toBe(wire);
   });
+
+  // Timeout coherence with the backend's max response math: /geocode can
+  // spend up to 10s and /route up to 15s (routing + the optional exposure
+  // section capped at ~4s) before their own timeouts short-circuit, so the
+  // client budget was raised from 15s to 30s (10 + 15 + slack, finite on
+  // purpose). Asserted at the COMPONENT level here — the abort timer's delay
+  // is spied while the real (constant-driven) setTimeout call runs, since
+  // REQUEST_TIMEOUT_MS itself is module-private.
+  test('schedules its abort timer at 30000 ms (backend max response math: 10s geocode + 15s routing + 4s exposure + slack)', async () => {
+    global.fetch.mockResolvedValueOnce(wireResponse({ ping: true }));
+    const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+    const clearTimeoutSpy = jest.spyOn(global, 'clearTimeout');
+    await fetchWithTimeout('http://test.host/route');
+    // Read the recorded calls BEFORE mockRestore: restoring a spy also resets
+    // its call log (the top-level afterEach restoreAllMocks was too late and
+    // restore-in-finally emptied the log under our feet).
+    const abortTimers = setTimeoutSpy.mock.calls.filter(([, ms]) => typeof ms === 'number');
+    expect(abortTimers).toHaveLength(1);
+    expect(abortTimers[0][1]).toBe(30000);
+    // And it was cleared once the fetch settled (success path, as before).
+    expect(clearTimeoutSpy).toHaveBeenCalled();
+    setTimeoutSpy.mockRestore();
+    clearTimeoutSpy.mockRestore();
+  });
 });
 
 // Two-tier API base URL resolution (src/constants.js): the local dev

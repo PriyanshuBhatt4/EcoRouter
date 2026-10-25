@@ -41,10 +41,10 @@ npx expo start
 
 The local setup above only works when phone and computer share one Wi-Fi. To use the app on **other Wi-Fi networks or mobile data**, host the backend publicly (`https://`) and point the app at it — the backend URL is the only address the app ever needs.
 
-The project ships a ready hosting spec: **backend/render.yaml** (Render blueprint: free plan, `uvicorn app.main:app` startup, `/health` check, CORS open to any origin). One manual deployment is required:
+The project ships a ready hosting spec: **`render.yaml` (repository root)** — a Render blueprint for the `backend/` service (free plan, `uvicorn app.main:app` startup, `/health` check, CORS open to any origin). One manual deployment is required:
 
 1. **Get the code into a Git host you control.** Render deploys from a Git repository (GitHub/GitLab). Create an account + an empty repo if you don't have one, then put this project there (a git commit + push must be done by you — work in this repo is deliberately left uncommitted).
-2. **Deploy on Render**: render.com → "New" → "Blueprint" → select your repo. Render reads `render.yaml` (build: `pip install -r requirements.txt`, start: `uvicorn app.main:app`, health check `/health`, free plan). No database configuration is required — cloud-sync endpoints stay honest `503`s.
+2. **Deploy on Render**: render.com → "New" → "Blueprint" → select your repo. Render reads the **`render.yaml` at the repository root** (build: `pip install -r requirements.txt`, start: `uvicorn app.main:app`, health check `/health`, free plan). No database configuration is required — cloud-sync endpoints stay honest `503`s.
 3. Optionally set the environment variables listed (empty by design) in `render.yaml` — `DATABASE_URL`, `SUPABASE_*` — only if you later want cloud sync. **Never put backend secrets into any Expo variable**; Expo vars are compiled into the app.
 4. Verify the URL honestly: open `https://<your-service>.onrender.com/health` — it must say `"status":"ok"`. Until this succeeds, the app must keep using the local setup.
 5. Point the app at it: in the project root `.env.local` set `EXPO_PUBLIC_API_BASE_URL=https://<your-service>.onrender.com` (restart `npx expo start`, press `r`). This works even while running the app through Expo Go, from any network.

@@ -5,13 +5,19 @@
 
 import { API_BASE_URL, ERROR_MESSAGES } from '../constants';
 
-// Client-side request timeout (~15s). A backend that accepts the TCP
-// connection but never answers would otherwise leave the awaiting screen
-// spinning forever. The abort surfaces as a fetch REJECTION inside the
-// existing try/catch blocks, which map it to ERROR_MESSAGES.NETWORK — the
-// exact same error pathway (and user copy) as an unreachable backend. No
-// new error string was needed.
-const REQUEST_TIMEOUT_MS = 15000;
+// Client-side request timeout (30s). Tied to the backend's own max response
+// math on a slow-but-SUCCESSING day: /geocode can run up to 10s and /route
+// (with routing + the optional exposure section, itself capped at ~4s total)
+// up to 15s before their own timeouts short-circuit — plus slack. The
+// previous 15s budget aborted a request that was about to succeed once
+// geocoding was slow, losing available routes. A backend that accepts the
+// TCP connection but never answers would otherwise leave the awaiting
+// screen spinning forever. The abort surfaces as a fetch REJECTION inside
+// the existing try/catch blocks, which map it to ERROR_MESSAGES.NETWORK —
+// the exact same error pathway (and user copy) as an unreachable backend.
+// No new error string was needed. Deliberately FINITE (never
+// infinite/undefined): even the honest slow path must have a hard stop.
+const REQUEST_TIMEOUT_MS = 30000;
 
 // fetch wrapper adding an AbortController-based timeout. Request semantics
 // are untouched: url and options pass straight through except for the extra

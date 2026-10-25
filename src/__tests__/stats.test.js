@@ -116,6 +116,51 @@ describe('lifetimeStats', () => {
     expect(s.exposureUgM3).toBeCloseTo(50, 6);
   });
 
+  // PM-capture milestone: completed trips now carry plannedPm25 (the RAW
+  // value of the selected planned route's pm25_estimate, only when the
+  // backend marked it available). Old trips without the field are ignored,
+  // never counted as 0, so a single new trip is not diluted by history.
+  test('plannedPm25: mean over the trips that carry it, old trips ignored (not counted as 0)', () => {
+    const mixed = [
+      { mode: 'walking', plannedPm25: 12.5 }, // new-style trip (raw backend value)
+      { mode: 'walking', plannedPm25: 30 }, // raw value, no rounding applied
+      { mode: 'walking' }, // legacy trip without the field — excluded
+      { mode: 'cycling' }, // another legacy trip — excluded
+      {},
+      null,
+    ];
+    const s = lifetimeStats(mixed, { weightKg: '70' });
+    expect(s.exposureUgM3).toBeCloseTo((12.5 + 30) / 2, 6);
+  });
+
+  test('plannedPm25: a single new trip yields exactly its own raw value', () => {
+    const s = lifetimeStats([{ mode: 'walking', actualDistanceM: 1200, durationSec: 900, plannedPm25: 8.299999 }], {});
+    expect(s.exposureUgM3).toBeCloseTo(8.299999, 6);
+  });
+
+  test('plannedPm25: junk values (NaN / non-number / Infinity) never poison the mean', () => {
+    const s = lifetimeStats(
+      [
+        { mode: 'walking', plannedPm25: NaN },
+        { mode: 'walking', plannedPm25: 'junk' },
+        { mode: 'walking', plannedPm25: Infinity },
+        { mode: 'walking', plannedPm25: 41.5 },
+      ],
+      {}
+    );
+    expect(s.exposureUgM3).toBeCloseTo(41.5, 6);
+  });
+
+  test('plannedPm25: trips without any air field keep exposureUgM3 null (empty state preserved)', () => {
+    expect(lifetimeStats(walkingTrips, {}).exposureUgM3).toBeNull();
+    expect(
+      lifetimeStats(
+        [{ mode: 'walking', actualDistanceM: 1200, durationSec: 900, plannedPm25: NaN }],
+        {}
+      ).exposureUgM3
+    ).toBeNull();
+  });
+
   test('MET_BY_MODE exposes the documented weights', () => {
     expect(MET_BY_MODE).toEqual({ walking: 3.5, cycling: 7.0 });
   });

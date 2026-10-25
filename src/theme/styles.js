@@ -53,6 +53,8 @@ export function makeStyles(t) {
       paddingVertical: 12,
       ...shadowOverlay,
     },
+    // Keyboard: app.json uses Expo's default resize mode — the whole window
+    // shrinks, so the absolute bottom card sits above the keyboard.
     searchInput: {
       fontSize: 15,
       color: t.textPrimary,
@@ -206,6 +208,30 @@ export function makeStyles(t) {
     // Collapsed active-trip variant: tighter padding so the interactive row
     // stays ~64-72px; the attribution line folds in underneath it.
     bottomCardCompact: { padding: 12 },
+    // Route-results panel (expanded): scroll area shrinks under the fixed
+    // Start Trip footer inside the maxHeight-capped card. The ScrollView's
+    // real pixel cap comes from MapScreen (useWindowDimensions-derived
+    // inline maxHeight); these flex settings keep it shrinkable-but-grown,
+    // so hugging short content still works while tall content is clipped
+    // into the scroller instead of pushing the footer off-screen.
+    panelScroll: { flexGrow: 0, flexShrink: 1, flexBasis: 'auto' },
+    panelScrollContent: { paddingBottom: 8 },
+    // Drag-handle affordance at the top of the expanded card: purely visual
+    // (no gesture implemented behind it). Centered thin rounded bar.
+    panelHandleHost: { alignItems: 'center', marginBottom: 6 },
+    panelHandle: { width: 36, height: 4, borderRadius: 2, backgroundColor: t.border },
+    // Pinned header row of the expanded panel: routes title (left, wraps to
+    // 2 lines max) + always-reachable collapse control (right). Rendered
+    // above the scroll area so it never scrolls away. Logical start/end
+    // padding and gap keep it RTL-safe.
+    panelHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 },
+    // Header title wrapper: lets the existing routesTitle text shrink so the
+    // header control keeps its full touch target on narrow screens.
+    panelHeaderTitle: { flexShrink: 1 },
+    // Header collapse control host: >= 44 logical px touch target. Uses the
+    // same accent-text token family as the expand/ghost controls.
+    panelCollapseTouch: { minHeight: 44, justifyContent: 'center', paddingStart: 8 },
+    panelCollapseText: { fontSize: 13, fontWeight: '600', color: t.accentText },
     sectionLabel: { fontSize: 12, color: t.textSecondary, letterSpacing: 0.5, marginBottom: 12 },
     modeRow: { flexDirection: 'row', gap: 8, marginBottom: 4 },
     modeBtn: {
@@ -227,6 +253,7 @@ export function makeStyles(t) {
 
     statusRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 8 },
     loadingText: { fontSize: 14, color: t.textSecondary },
+    loadingCaption: { fontSize: 12, color: t.textTertiary, lineHeight: 16, marginTop: 4 },
 
     errorCard: {
       backgroundColor: t.errorTint,
@@ -315,6 +342,17 @@ export function makeStyles(t) {
       padding: 8,
       fontSize: 12,
       marginTop: 6,
+    },
+    // ADDITIVE distance-pause caption (active trip cards): mirrors the caption
+    // family used inside the cards (11 / 15 line height), accent tint like the
+    // trip line it annotates. Plain text note — no background block: it says
+    // the distance readout is paused while GPS is unreliable, softer than the
+    // amber gpsNotice block which keeps its own independent rendering.
+    distancePausedNote: {
+      fontSize: 11,
+      color: t.accentDeep,
+      lineHeight: 15,
+      marginTop: 4,
     },
 
     // Collapsed active-trip card: one modest row (mode pill + live stats +
@@ -480,7 +518,11 @@ export function makeStyles(t) {
     statTileLabel: { fontSize: 11, color: t.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 4, lineHeight: 15 },
     // Caption size rule: tertiary 11 with lineHeight 15 (keeping its token).
     statCaption: { fontSize: 11, color: t.textTertiary, lineHeight: 15, marginTop: 10 },
-    // Trip-streak panel tiles + activity grid.
+    // Trip-streak panel tiles + activity heatmap. Fixed-px geometry, mirrored
+    // as numeric constants in ProfileScreen.js (this file is a factory and
+    // cannot export numbers): CELL 13 + GAP 3 = PITCH 16, so 7 rows are
+    // 112px; ~53 week columns × 16 + 34px weekday column ≈ 880px wide —
+    // horizontal scroll by design, never shrink-to-fit.
     streakTileRow: { flexDirection: 'row', gap: 8 },
     streakTile: {
       flex: 1,
@@ -493,12 +535,19 @@ export function makeStyles(t) {
     streakTileLabel: { fontSize: 11, color: t.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 4, lineHeight: 15 },
     streakSubline: { fontSize: 11, color: t.textSecondary, marginTop: 10, lineHeight: 15 },
     streakGridScroll: { marginTop: 12 },
-    streakGrid: { flexDirection: 'row', paddingVertical: 2, paddingRight: 8 },
+    streakMonthsRow: { flexDirection: 'row', marginBottom: 4 },
+    streakMonthLabel: { fontSize: 10, color: t.textTertiary, lineHeight: 14 },
+    streakGrid: { flexDirection: 'row' },
+    streakWeekdayCol: { justifyContent: 'flex-start' },
+    streakWeekdayLabel: { fontSize: 9, color: t.textTertiary, textAlign: 'right', height: 13, lineHeight: 13, marginBottom: 3 },
+    streakMonthBlock: { flexDirection: 'row' },
     streakCol: { marginRight: 3 },
-    streakCell: { width: 10, height: 10, borderRadius: 2, marginBottom: 3 },
-    streakLegendRow: { flexDirection: 'row', alignItems: 'center', marginTop: 10 },
-    streakLegendText: { fontSize: 11, color: t.textTertiary, marginRight: 4, lineHeight: 15 },
-    streakLegendCell: { width: 10, height: 10, borderRadius: 2, marginRight: 4 },
+    streakCell: { width: 13, height: 13, borderRadius: 3, marginBottom: 3 },
+    streakCellVoid: { width: 13, height: 13, borderRadius: 3, marginBottom: 3 },
+    streakLegendRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', marginTop: 10 },
+    streakLegendEntry: { flexDirection: 'row', alignItems: 'center' },
+    streakLegendText: { fontSize: 11, color: t.textTertiary, marginRight: 8, lineHeight: 15 },
+    streakLegendCell: { width: 10, height: 10, borderRadius: 3, marginRight: 4 },
     tripsHeaderCaption: { fontSize: 11, color: t.textTertiary },
     tripRow: {
       flexDirection: 'row',

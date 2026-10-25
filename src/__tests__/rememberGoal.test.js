@@ -220,7 +220,8 @@ describe('Remember my route goal (App shell)', () => {
     // second search starts from is unambiguous).
     await fireEvent.press(await screen.findByText('‹ Back')); // Settings -> Profile
     await fireEvent.press(await screen.findByText('‹ Map')); // Profile -> Map
-    await fireEvent.press(await screen.findByText('Collapse'));
+    // Collapse moved to the pinned header control of the results panel.
+    await fireEvent.press(await screen.findByText('Collapse ▴'));
     await fireEvent.press(await screen.findByText('Find Routes'));
     await fireEvent.press(await screen.findByText('▾ Expand'));
     expect(await screen.findByText(FASTEST_NOTE)).toBeTruthy();
@@ -231,7 +232,7 @@ describe('Remember my route goal (App shell)', () => {
     await fireEvent.press(await screen.findByLabelText('Remember my route goal'));
     await fireEvent.press(await screen.findByText('‹ Back')); // Settings -> Profile
     await fireEvent.press(await screen.findByText('‹ Map')); // Profile -> Map
-    await fireEvent.press(await screen.findByText('Collapse'));
+    await fireEvent.press(await screen.findByText('Collapse ▴')); // pinned header control
     // Re-run the search on the same destination input.
     await fireEvent.press(await screen.findByText('Find Routes'));
     await fireEvent.press(await screen.findByText('▾ Expand'));
@@ -483,5 +484,113 @@ describe('Reentrancy + erase-all race guards (App shell)', () => {
     await fireEvent.press(await screen.findByText('‹ Map'));
     expect(await screen.findByText('Plan your walk or cycle')).toBeTruthy();
     expect(screen.queryByText('Route 1')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Planned-route PM2.5 capture (trip record, ADDITIVE):
+// Start Trip snapshots the SELECTED route's pm25_estimate value — only when
+// the backend marked it available AND the value is a finite number — into
+// the active-trip record; Finish Trip carries it into the saved trip as
+// plannedPm25 (raw, no rounding). Without a usable estimate the field stays
+// ABSENT (never 0 / null-written), so old records and estimate-less new
+// trips keep the exact legacy shape.
+// ---------------------------------------------------------------------------
+describe('Planned-route PM capture (App shell)', () => {
+  beforeEach(async () => {
+    await AsyncStorage.clear();
+    jest.restoreAllMocks();
+  });
+  afterEach(() => {
+    cleanup();
+  });
+
+  const stageEstimates = (firstValue, secondValue) => {
+    fetchRouteCandidates.mockImplementationOnce(async () => ({
+      candidates: [
+        {
+          id: 'route-0',
+          coordinates: [
+            { latitude: 28.6, longitude: 77.2 },
+            { latitude: 28.605, longitude: 77.21 },
+          ],
+          distanceMeters: 1200,
+          durationSeconds: 900,
+          pm25_estimate: { available: firstValue !== null, can_compare_cleanest: false, value: firstValue },
+        },
+        {
+          id: 'route-1',
+          coordinates: [
+            { latitude: 28.6, longitude: 77.2 },
+            { latitude: 28.61, longitude: 77.215 },
+          ],
+          distanceMeters: 800,
+          durationSeconds: 1100,
+          pm25_estimate: { available: secondValue !== null, can_compare_cleanest: false, value: secondValue },
+        },
+      ],
+      destination: { latitude: 28.61, longitude: 77.215 },
+    }));
+  };
+
+  test('finishTrip captures plannedPm25 from the SELECTED candidate (raw value, Route 2 chosen over Route 1)', async () => {
+    // route-0 carries 12.5, route-1 carries 30 — decisive proof the SELECTED
+    // route's figure is stored, not the preselected first one.
+    stageEstimates(12.5, 30);
+
+    const screen = await render(<App />);
+    const input = await screen.findByPlaceholderText('Where to? (e.g., Hauz Khas)');
+    await fireEvent.changeText(input, 'Some park');
+    await fireEvent.press(await screen.findByText('Find Routes'));
+    await fireEvent.press(await screen.findByText('▾ Expand'));
+    await screen.findByText('Route 2');
+
+    // Select the SECOND route card, then start the trip from it.
+    await fireEvent.press(await screen.findByText('Route 2'));
+    await fireEvent.press(await screen.findByText('Start Trip'));
+
+    // The ACTIVE record snapshots the same figure (additive field).
+    const rawActive = await AsyncStorage.getItem('@EcoRoute/activeTrip');
+    expect(JSON.parse(rawActive)).toMatchObject({ mode: 'walking', plannedPm25: 30 });
+
+    // Then finish and check the COMPLETED trip record.
+    await fireEvent.press(await screen.findByText('Finish Trip'));
+    const raw = await AsyncStorage.getItem('@EcoRoute/trips');
+    const trips = JSON.parse(raw);
+    expect(trips).toHaveLength(1);
+    expect(trips[0].plannedPm25).toBe(30);
+  });
+
+  test('no usable estimate (unavailable row): no plannedPm25 field is written anywhere (legacy shape)', async () => {
+    // marked available:false (null value) — the honest absence case.
+    stageEstimates(null, 9.1);
+    // Default selection = Route 1 (no option-card press), which is the
+    // UNAVAILABLE row.
+
+    const screen = await render(<App />);
+    const input = await screen.findByPlaceholderText('Where to? (e.g., Hauz Khas)');
+    await fireEvent.changeText(input, 'Some park');
+    await fireEvent.press(await screen.findByText('Find Routes'));
+    await fireEvent.press(await screen.findByText('▾ Expand'));
+    await fireEvent.press(await screen.findByText('Start Trip'));
+
+    // Active record keeps the legacy fields only.
+    const rawActive = await AsyncStorage.getItem('@EcoRoute/activeTrip');
+    expect(rawActive).not.toBeNull();
+    expect(JSON.parse(rawActive)).not.toHaveProperty('plannedPm25');
+
+    await fireEvent.press(await screen.findByText('Finish Trip'));
+    const raw = await AsyncStorage.getItem('@EcoRoute/trips');
+    const trips = JSON.parse(raw);
+    expect(trips).toHaveLength(1);
+    expect(trips[0]).not.toHaveProperty('plannedPm25');
+  });
+
+  test('no selected route at all: Start Trip unavailable, nothing stored', async () => {
+    // Sanity anchor: with no search run there is no Start Trip button and no
+    // active record to carry an estimate from.
+    const screen = await render(<App />);
+    expect(screen.queryByText('Start Trip')).toBeNull();
+    expect(await AsyncStorage.getItem('@EcoRoute/activeTrip')).toBeNull();
   });
 });

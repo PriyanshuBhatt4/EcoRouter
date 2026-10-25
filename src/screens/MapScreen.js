@@ -1,8 +1,18 @@
 import React from 'react';
-import { Text, View, TextInput, TouchableOpacity, ActivityIndicator, ScrollView, Image } from 'react-native';
+import {
+  Text,
+  View,
+  TextInput,
+  TouchableOpacity,
+  ActivityIndicator,
+  ScrollView,
+  Image,
+  useWindowDimensions,
+} from 'react-native';
 import MapView, { Polyline, Marker } from 'react-native-maps';
 import { StatusBar } from 'expo-status-bar';
 import { formatDistance, formatDuration, formatDurationLong, formatPmUnits } from '../lib/format';
+import { distanceBetweenFixes } from '../lib/track';
 import { PREFERENCES, preferenceNote } from '../lib/preferences';
 import { ATTRIBUTION_TEXT, DEFAULT_REGION, MODES } from '../constants';
 import { DARK_MAP_STYLE } from '../theme/palette';
@@ -67,6 +77,12 @@ export default function MapScreen({
   // map + location state
   mapRef,
   location,
+  // Raw REQUEST-ORIGIN state from App (acquireOrigin -> setCurrentCoords /
+  // setCurrentAccuracy): the exact GPS fix the route request consumed,
+  // surfaced only for the route-start connector representation below. The
+  // route never moves and the request is unchanged — this is display only.
+  currentCoords = null,
+  currentAccuracy = null,
   locationError,
   locationBannerDismissed,
   setLocationBannerDismissed,
@@ -104,6 +120,10 @@ export default function MapScreen({
   tripElapsed,
   tripDistance,
   lowAccuracyActive,
+  // ADDITIVE: true while consecutive low-accuracy fixes paused the distance
+  // readout (windowed accountant holding back unverifiable meters). Defaults
+  // to false so every pre-existing MapScreen mount behaves identically.
+  distancePaused = false,
   tripDetailsExpanded,
   setTripDetailsExpanded,
   distUnit,
@@ -122,6 +142,88 @@ export default function MapScreen({
   // helper; {show:false} for manual/empty states, null only for unknown
   // preference keys (which never occur from the chips UI).
   const prefNoteState = preferenceNote(preference, candidates);
+
+  // Route-start snapping REPRESENTATION (honest fix, display only): Valhalla
+  // snaps the raw start to the nearest walkable road, so every candidate
+  // polyline begins at the SNAPPED point — not at the request origin where
+  // the user actually stands. acquireOrigin already sent the raw GPS fix and
+  // App stored it in currentCoords/currentAccuracy; nothing about the route
+  // or the request changes here. When the SELECTED candidate's start sits
+  // >= 25m from that captured origin, we draw ONE dashed connector polyline
+  // on the map and one honest caption in the expanded panel showing where
+  // the step onto the road happens. Below 25m GPS noise dominates: no
+  // connector, no caption. The gap is computed CLIENT-SIDE per selected
+  // candidate with the existing pure haversine (distanceBetweenFixes,
+  // src/lib/track.js) — deliberately NOT the backend's candidates[0]
+  // .start_snap_m, which reports the snap of the PRIMARY route only and
+  // could mismatch the selected alternate. Route math/selection untouched.
+  const routeConnector = (() => {
+    if (routeStatus !== 'success' || !candidates || candidates.length === 0 || !selectedId) {
+      return null;
+    }
+    const originOk =
+      currentCoords &&
+      typeof currentCoords.latitude === 'number' &&
+      Number.isFinite(currentCoords.latitude) &&
+      typeof currentCoords.longitude === 'number' &&
+      Number.isFinite(currentCoords.longitude);
+    if (!originOk) return null;
+    const selected = candidates.find((c) => c && c.id === selectedId) || candidates[0];
+    const rawStart =
+      selected && Array.isArray(selected.coordinates) && selected.coordinates.length > 0
+        ? selected.coordinates[0]
+        : null;
+    // candidates from services/api.js are already mapped to
+    // {latitude, longitude} objects; a raw [lng, lat] pair is tolerated
+    // defensively with the same [1],[0] conversion api.js applies.
+    const snapPoint =
+      rawStart &&
+      typeof rawStart.latitude === 'number' &&
+      Number.isFinite(rawStart.latitude) &&
+      typeof rawStart.longitude === 'number' &&
+      Number.isFinite(rawStart.longitude)
+        ? { latitude: rawStart.latitude, longitude: rawStart.longitude }
+        : Array.isArray(rawStart) &&
+          typeof rawStart[0] === 'number' &&
+          Number.isFinite(rawStart[0]) &&
+          typeof rawStart[1] === 'number' &&
+          Number.isFinite(rawStart[1])
+          ? { latitude: rawStart[1], longitude: rawStart[0] }
+          : null;
+    if (!snapPoint) return null;
+    const gapM = distanceBetweenFixes(currentCoords, snapPoint);
+    if (!(gapM >= 25)) return null;
+    // Honest accuracy context, appended only when the device reports a
+    // horizontal error at least comparable to the gap itself; omitted
+    // entirely when accuracy is unknown (never shames the fix).
+    const accuracyNote =
+      typeof currentAccuracy === 'number' &&
+      Number.isFinite(currentAccuracy) &&
+      currentAccuracy > gapM * 0.8
+        ? `Your location marker may drift by about ${
+            formatDistance(currentAccuracy, distUnit) || '—'
+          } on this device.`
+        : null;
+    return { snapPoint, gapM, accuracyNote };
+  })();
+  // SINGLE-SOURCE PANEL BUDGET (root-cause fix): both the card's pixel cap
+  // and the scroll area's pixel cap derive from ONE dim.height value so
+  // neither depends on the other's clamp propagating. The card keeps its
+  // 58% visual token in styles.bottomCard, but we also pin that exact pixel
+  // value inline so the scroll bound below can subtract the card's fixed
+  // chrome from the SAME number instead of guessing a second percentage:
+  //   panelCardMax = round(h * 0.58)            — the card's pixel cap
+  //   panelScrollMax = max(120, round − 190)    — the scroll's pixel cap
+  // The 190px subtraction covers everything stacked INSIDE the card above
+  // and below the scroll area: panel header row ~46 (routes title +
+  // Collapse), Start Trip button ~48, the buttonGapCard gap 12, and ~64 of
+  // card padding + chrome (grabs/labels), plus a small safety margin. The
+  // max(120, …) floor keeps a usable scroll on very short windows. Invariant:
+  // panelScrollMax + 190 ≤ panelCardMax, so the scroll can never exceed the
+  // card regardless of window height.
+  const dim = useWindowDimensions();
+  const panelCardMax = Math.round(dim.height * 0.58);
+  const panelScrollMax = Math.max(120, panelCardMax - 190);
   return (
     <View style={styles.container}>
       <StatusBar style={isDark ? 'light' : 'dark'} />
@@ -142,6 +244,25 @@ export default function MapScreen({
             opacity={c.id === selectedId ? 1 : 0.6}
           />
         ))}
+        {/* Route-start connector (dashed, visually distinct from route
+            lines): runs from the raw request origin to the selected
+            candidate's snapped start whenever they sit >= 25m apart. The
+            route polyline itself is unchanged; this only shows the walk to
+            the nearest road, so the blue dot stays honest and no route is
+            moved. */}
+        {routeConnector ? (
+          <Polyline
+            testID="routeConnector"
+            coordinates={[
+              { latitude: currentCoords.latitude, longitude: currentCoords.longitude },
+              routeConnector.snapPoint,
+            ]}
+            strokeWidth={3}
+            lineDashPattern={[3, 6]}
+            strokeColor={t.amber}
+            opacity={0.7}
+          />
+        ) : null}
         {destinationCoord && candidates.length > 0 && (
           <Marker coordinate={destinationCoord} pinColor={t.amber} />
         )}
@@ -256,7 +377,19 @@ export default function MapScreen({
         </TouchableOpacity>
       )}
 
-      <View style={[styles.bottomCard, tripActive && !tripDetailsExpanded && styles.bottomCardCompact]}>
+      <View
+        style={[
+          styles.bottomCard,
+          tripActive && !tripDetailsExpanded && styles.bottomCardCompact,
+          // Inline PIXEL cap mirroring the same dim.height the scroll bound
+          // below derives from (one source, two bounds — see the budget
+          // comment above). The inline pixel value overrides the '%' token
+          // in styles.bottomCard, which stays untouched for any other
+          // render branch of this shared style. In the compact trip state
+          // the card is small, so the cap never binds there.
+          { maxHeight: panelCardMax },
+        ]}
+      >
         {tripActive && !tripDetailsExpanded ? (
           <>
             <View style={styles.compactTripCard}>
@@ -269,6 +402,15 @@ export default function MapScreen({
                       ? `\u2248 ${formatDistance(tripDistance, distUnit) || '—'} (low GPS)`
                       : (formatDistance(tripDistance, distUnit) || '—')}
                   </Text>
+                  {/* ADDITIVE honest caption: the windowed accountant has
+                      paused distance while GPS is unreliable; text only, the
+                      low-accuracy warning and the distance figures above are
+                      untouched. */}
+                  {distancePaused === true && tripActive && (
+                    <Text style={styles.distancePausedNote}>
+                      Distance is paused while GPS signal is unreliable.
+                    </Text>
+                  )}
                   <Text style={styles.compactElapsed} numberOfLines={1}>
                     {formatDurationLong(tripElapsed)}
                   </Text>
@@ -314,9 +456,20 @@ export default function MapScreen({
             )}
 
             {routeStatus === 'loading' && (
-              <View style={styles.statusRow}>
-                <ActivityIndicator size="small" color={t.primary} />
-                <Text style={styles.loadingText}>Finding routes…</Text>
+              <View>
+                <View style={styles.statusRow}>
+                  <ActivityIndicator size="small" color={t.primary} />
+                  <Text style={styles.loadingText}>Finding routes…</Text>
+                </View>
+                {/* Honest expectation-setting for the client's 30s fetch
+                    budget: geocoding + routing + the optional exposure
+                    section can legitimately take a while (the backend's own
+                    timeouts run up to ~10s + ~15s + ~4s) before the search
+                    either surfaces routes or an error. No spinner spin-forever
+                    silence and no fake progress — one honest line. */}
+                <Text style={styles.loadingCaption}>
+                  Finding routes — this can take up to about half a minute on slow days.
+                </Text>
               </View>
             )}
 
@@ -332,22 +485,79 @@ export default function MapScreen({
 
             {routeStatus === 'success' && primary && !tripActive && (
               <View>
-                <Text style={styles.routesTitle}>
-                  Routes returned: {candidates.length}
-                  {candidates.length === 1 ? ' (only one route available)' : ''}
-                </Text>
-
                 {!panelExpanded ? (
-                  <View style={styles.expandRow}>
-                    <Text style={styles.summaryText} numberOfLines={1}>
-                      {mode} • {preference} • {formatDistance(primary.distanceMeters, distUnit) || '—'} • {formatDuration(primary.durationSeconds) || '—'} (est.)
+                  <>
+                    <Text style={styles.routesTitle}>
+                      Routes returned: {candidates.length}
+                      {candidates.length === 1 ? ' (only one route available)' : ''}
                     </Text>
-                    <TouchableOpacity style={styles.expandTouch} onPress={() => setPanelExpanded(true)}>
-                      <Text style={styles.expandText}>▾ Expand</Text>
-                    </TouchableOpacity>
-                  </View>
+
+                    <View style={styles.expandRow}>
+                      <Text style={styles.summaryText} numberOfLines={1}>
+                        {mode} • {preference} • {formatDistance(primary.distanceMeters, distUnit) || '—'} • {formatDuration(primary.durationSeconds) || '—'} (est.)
+                      </Text>
+                      <TouchableOpacity style={styles.expandTouch} onPress={() => setPanelExpanded(true)}>
+                        <Text style={styles.expandText}>▾ Expand</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </>
                 ) : (
                   <View>
+                    {/* Visual drag-handle affordance at the very top of the
+                        expanded card content: a thin rounded bar, purely
+                        decorative (no gesture is implemented behind it) —
+                        collapse is handled by the header control below. */}
+                    <View style={styles.panelHandleHost} testID="panelHandleHost">
+                      <View style={styles.panelHandle} testID="panelHandle" />
+                    </View>
+
+                    {/* PINNED HEADER, above everything and never scrolled:
+                        it is a fixed sibling rendered OUTSIDE the scroll
+                        area, so the routes title and the collapse control
+                        stay reachable no matter how far the list scrolls. */}
+                    <View style={styles.panelHeaderRow}>
+                      <Text
+                        style={[styles.routesTitle, styles.panelHeaderTitle]}
+                        numberOfLines={2}
+                      >
+                        Routes returned: {candidates.length}
+                        {candidates.length === 1 ? ' (only one route available)' : ''}
+                      </Text>
+                      {/* ONE collapse control, always reachable: it moved
+                          from the scrolling-dependent footer into this
+                          pinned header and dispatches the same
+                          setPanelExpanded(false). */}
+                      <TouchableOpacity
+                        style={styles.panelCollapseTouch}
+                        onPress={() => setPanelExpanded(false)}
+                        testID="panelCollapseTouch"
+                        accessibilityRole="button"
+                        accessibilityLabel="Collapse routes panel"
+                      >
+                        <Text style={styles.panelCollapseText}>Collapse ▴</Text>
+                      </TouchableOpacity>
+                    </View>
+
+                      {/* Scrollable middle with a DETERMINISTIC PIXEL BOUND:
+                          panelScrollMax derives from the SAME dim.height
+                          (and the SAME 58% card cap) as the card's inline
+                          maxHeight above: max(120, round(h*0.58) − 190).
+                          Subtracting the card's fixed chrome from the card
+                          cap (not guessing a second percentage) guarantees
+                          the scroll can never push past the card. The
+                          inline pixel value — unlike a percentage maxHeight
+                          on the auto-height parent — gives the ScrollView
+                          a definite height cap so it can actually scroll
+                          on device. nestedScrollEnabled keeps vertical
+                          scrolling working inside the card's horizontal
+                          chip scrollers on Android. Start Trip stays fixed
+                          below, outside this ScrollView. */}
+                    <ScrollView
+                      style={[styles.panelScroll, { maxHeight: panelScrollMax }]}
+                      contentContainerStyle={styles.panelScrollContent}
+                      testID="routePanelScroll"
+                      nestedScrollEnabled={true}
+                    >
                     {candidates.length > 1 && (
                       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.optionsScroll}>
                         {candidates.map((c, idx) => {
@@ -412,6 +622,27 @@ export default function MapScreen({
                       <Text style={styles.prefNote}>{prefNoteState.text}</Text>
                     ) : null}
 
+                    {/* Honest route-start caption (EXPANDED panel only,
+                        never the collapsed branch): explains the dashed
+                        link on the map. States where the route actually
+                        begins (nearest walkable road), without claiming GPS
+                        error or shaming the fix; the drift sentence appears
+                        only when the device's reported accuracy is
+                        comparable to the gap. formatDistance is the same
+                        distUnit-aware formatter used for the stats. */}
+                    {routeConnector ? (
+                      <View>
+                        <Text style={styles.prefNote} testID="routeConnectorNote">
+                          Route starts about {formatDistance(routeConnector.gapM, distUnit) || '—'} away, at the nearest walkable road. The dashed link shows where you step onto it.
+                        </Text>
+                        {routeConnector.accuracyNote ? (
+                          <Text style={styles.prefNote}>
+                            {routeConnector.accuracyNote}
+                          </Text>
+                        ) : null}
+                      </View>
+                    ) : null}
+
                     <View style={styles.statsRow}>
                       <View style={styles.statBox}>
                         <Text style={styles.statLabel}>Distance</Text>
@@ -428,9 +659,13 @@ export default function MapScreen({
                     {primary.pm25_estimate && (
                       <PmEstimate styles={styles} estimate={primary.pm25_estimate} />
                     )}
+                    </ScrollView>
 
+                    {/* Fixed footer: Start Trip only — it is a sibling
+                        OUTSIDE the ScrollView above, so motion in the list
+                        never shifts it. The old footer Collapse ghost was
+                        removed in favor of the single pinned-header control. */}
                     <PrimaryButton styles={styles} style={styles.buttonGapCard} onPress={startTrip} label="Start Trip" />
-                    <GhostButton styles={styles} onPress={() => setPanelExpanded(false)} label="Collapse" />
                   </View>
                 )}
               </View>
@@ -452,6 +687,15 @@ export default function MapScreen({
                     ? `\u2248 ${formatDistance(tripDistance, distUnit) || '—'} (low GPS)`
                     : (formatDistance(tripDistance, distUnit) || '—')}
                 </Text>
+                {/* ADDITIVE honest caption (expanded card): same condition
+                    and same copy as the compact card's note — the readout is
+                    paused while GPS is unreliable. Independent of, and
+                    additional to, the lowAccuracyActive warning above. */}
+                {distancePaused === true && tripActive && (
+                  <Text style={styles.distancePausedNote}>
+                    Distance is paused while GPS signal is unreliable.
+                  </Text>
+                )}
                 <PrimaryButton styles={styles} style={[styles.buttonBlue, styles.buttonGapCard]} onPress={finishTrip} label="Finish Trip" />
                 <GhostButton styles={styles} onPress={() => setTripDetailsExpanded(false)} label="Details ▴" />
               </View>

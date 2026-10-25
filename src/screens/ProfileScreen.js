@@ -2,10 +2,38 @@ import React from 'react';
 import { Text, View, TextInput, TouchableOpacity, ScrollView, Image } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { formatDistance, formatDurationLong, formatTripDate } from '../lib/format';
-import { lifetimeStats, streakCalendar, computeBadges, weekSummary } from '../lib/stats';
+import { lifetimeStats, streakCalendar, streakCalendarHeatmap, computeBadges, weekSummary } from '../lib/stats';
 import { DEFAULT_PREFS } from '../constants';
 import { RING_COLORS } from '../theme/palette';
 import { ScreenHeader, ModePill, StatTile, GhostButton, EmptyState } from '../components/ui';
+
+// Streak-heatmap geometry mirror. The fixed px values live in theme/styles.js
+// (streakCell / streakCol tokens), but that file is a factory function
+// (makeStyles) and cannot export numbers, so the numeric pairs are mirrored
+// here — keep both sides in sync when editing either one:
+//   CELL 13 + GAP 3 = PITCH 16 → 7 rows at 16 = 112px tall (fits on-screen);
+//   ~53 week columns × 16 + 34px weekday column ≈ 880px wide, so the grid is
+//   horizontally scrollable BY DESIGN and never shrinks to fit.
+const STREAK_CELL_SIZE = 13; // styles.streakCell.width / height
+const STREAK_GAP = 3; // styles.streakCell.marginBottom / styles.streakCol.marginRight
+const STREAK_PITCH = STREAK_CELL_SIZE + STREAK_GAP; // 16 — one week column step
+const STREAK_WEEKDAY_COL_WIDTH = 34; // 3-letter weekday label column
+const STREAK_WEEKDAY_GUTTER = 4; // gap between label column and first block
+
+// Row labels for the 7 fixed weekday rows (index 0 = Sunday .. 6 = Saturday,
+// matching streakCalendarHeatmap's slot layout).
+const STREAK_WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+// Legend is fully static and deterministic — all swatches render always (no
+// live-data gating, no fabricated state). Level labels match stats.js
+// levelForCount semantics (1 / 2 / 3+); the hollow swatch is the honesty
+// rule's "no recorded history" representation.
+const STREAK_LEGEND = [
+  { level: 0, label: 'No activity' },
+  { level: 1, label: '1 trip' },
+  { level: 2, label: '2 trips' },
+  { level: 3, label: '3+ trips' },
+];
 
 export default function ProfileScreen({
   // theming
@@ -34,15 +62,12 @@ export default function ProfileScreen({
   const hasName = Boolean(profile.name && profile.name.trim());
   const avatarChar = hasName ? profile.name.trim().charAt(0).toUpperCase() : '·';
   // Streak panel data: purely derived from the loaded trips state — no
-  // seeding, no fabricated activity.
+  // seeding, no fabricated activity. `ring` feeds the streak tiles; the
+  // heatmap reuses streakCalendar internally, so grid and tiles can never
+  // disagree.
   const ring = streakCalendar(trips);
   const ringColors = isDark ? RING_COLORS.dark : RING_COLORS.light;
-  // Row-major per column: column = one week (7 rows, top to bottom), so the
-  // grid reads left-to-right oldest to newest like a contribution graph.
-  const streakColumns = [];
-  for (let i = 0; i < ring.cells.length; i += 7) {
-    streakColumns.push(ring.cells.slice(i, i + 7));
-  }
+  const heatmap = streakCalendarHeatmap(trips);
 
   return (
     <View style={styles.container}>
@@ -154,9 +179,13 @@ export default function ProfileScreen({
               Add your weight in details above for a calorie estimate.
             </Text>
           )}
-          {/* Air caption — fixed second line; saved trips record no air data. */}
+          {/* Air (est.) caption — what the figure actually is: the average
+              of the PLANNED routes' modelled PM2.5 the user had selected at
+              each trip start, never a measured exposure. Trips captured
+              before this field existed carry no plannedPm25 and are simply
+              excluded from the average (excludes rather than invents). */}
           <Text style={styles.statCaption}>
-            Not available yet — saved trips don&apos;t record air data.
+            Average modelled PM2.5 (µg/m³) of the planned routes selected at trip start — not measured exposure. Trips captured before this figure existed are excluded.
           </Text>
           {/* "This week" summary: gated by the dashboard.week preference. */}
           {dash.week === true && (
@@ -193,37 +222,88 @@ export default function ProfileScreen({
             <Text style={styles.streakSubline}>Complete trips to start building your streak.</Text>
           )}
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.streakGridScroll}>
-            <View style={styles.streakGrid}>
-              {streakColumns.map((col) => (
-                <View key={col[0].key} style={styles.streakCol}>
-                  {col.map((cell) => (
-                    <View
-                      key={cell.key}
-                      style={[
-                        styles.streakCell,
-                        cell.inHistory
-                          ? { backgroundColor: ringColors[cell.level] }
-                          : { backgroundColor: 'transparent', borderWidth: 1, borderColor: ringColors.hollowBorder },
-                      ]}
-                    />
+            <View>
+              {/* Month labels: one per month-group block, each label box
+                  spans weeks × pitch so it sits exactly over its block. */}
+              <View
+                style={[
+                  styles.streakMonthsRow,
+                  { marginLeft: STREAK_WEEKDAY_COL_WIDTH + STREAK_WEEKDAY_GUTTER },
+                ]}
+              >
+                {heatmap.months.map((m) => (
+                  <Text
+                    key={`month-${m.startKey}`}
+                    style={[styles.streakMonthLabel, { width: m.weeks.length * STREAK_PITCH }]}
+                  >
+                    {m.label}
+                  </Text>
+                ))}
+              </View>
+              <View style={styles.streakGrid}>
+                {/* Weekday label column: 7 rows sharing the exact cell pitch
+                    (height 13 + marginBottom 3 in the tokens). */}
+                <View
+                  style={[
+                    styles.streakWeekdayCol,
+                    { width: STREAK_WEEKDAY_COL_WIDTH, marginRight: STREAK_WEEKDAY_GUTTER },
+                  ]}
+                >
+                  {STREAK_WEEKDAYS.map((label) => (
+                    <Text key={label} style={styles.streakWeekdayLabel}>
+                      {label}
+                    </Text>
                   ))}
                 </View>
-              ))}
+                {/* Month-group blocks: one week column per column, row 0 =
+                    Sunday .. row 6 = Saturday, oldest → newest left to right. */}
+                {heatmap.months.map((m) => (
+                  <View key={`block-${m.startKey}`} style={styles.streakMonthBlock}>
+                    {m.weeks.map((week) => {
+                      const firstReal = week.find((c) => c !== null);
+                      return (
+                        <View key={`week-${firstReal.key}`} style={styles.streakCol}>
+                          {week.map((cell, ri) =>
+                            cell ? (
+                              <View
+                                key={cell.key}
+                                style={[
+                                  styles.streakCell,
+                                  cell.inHistory
+                                    ? { backgroundColor: ringColors[cell.level] }
+                                    : { backgroundColor: 'transparent', borderWidth: 1, borderColor: ringColors.hollowBorder },
+                                ]}
+                              />
+                            ) : (
+                              // Pre-window / future slots: plain placeholder
+                              // only — never a colored "inactive" tile.
+                              <View key={`void-${firstReal.key}-${ri}`} style={styles.streakCellVoid} />
+                            )
+                          )}
+                        </View>
+                      );
+                    })}
+                  </View>
+                ))}
+              </View>
             </View>
           </ScrollView>
           <View style={styles.streakLegendRow}>
-            <Text style={styles.streakLegendText}>Less</Text>
-            {[0, 1, 2, 3].map((lvl) => (
-              <View key={lvl} style={[styles.streakLegendCell, { backgroundColor: ringColors[lvl] }]} />
+            {STREAK_LEGEND.map((entry) => (
+              <View key={entry.label} style={styles.streakLegendEntry}>
+                <View style={[styles.streakLegendCell, { backgroundColor: ringColors[entry.level] }]} />
+                <Text style={styles.streakLegendText}>{entry.label}</Text>
+              </View>
             ))}
-            <Text style={styles.streakLegendText}>More</Text>
-            <View
-              style={[
-                styles.streakLegendCell,
-                { backgroundColor: 'transparent', borderWidth: 1, borderColor: ringColors.hollowBorder },
-              ]}
-            />
-            <Text style={styles.streakLegendText}>No history</Text>
+            <View style={styles.streakLegendEntry}>
+              <View
+                style={[
+                  styles.streakLegendCell,
+                  { backgroundColor: 'transparent', borderWidth: 1, borderColor: ringColors.hollowBorder },
+                ]}
+              />
+              <Text style={styles.streakLegendText}>Before first trip</Text>
+            </View>
           </View>
           </View>
         )}
