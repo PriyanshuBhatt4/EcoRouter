@@ -52,6 +52,38 @@ The project ships a ready hosting spec: **`render.yaml` (repository root)** — 
 
 Note: free Render services sleep when idle; the first request after sleep can take ~30 s (the app shows its normal "could not reach the backend" message, then works once the service wakes).
 
+## Standalone Android APK (no Expo Go, no laptop needed)
+
+The `preview` profile in `eas.json` builds an installable **APK** (internal distribution) that bakes the hosted backend URL in. The dev override `EXPO_PUBLIC_API_BASE_URL` is deliberately blank in this profile and `.env*` files never leave your machine (git-ignored, excluded from the EAS upload) — a laptop LAN IP can never leak into the APK.
+
+One-time setup (requires your own Expo account):
+
+1. `npm i -g eas-cli`
+2. `eas login`
+3. `npx eas init` (links this folder to your Expo account; writes `extra.eas.projectId` into `app.json`)
+4. Make sure the hosted backend is live: `https://ecorouter-backend.onrender.com/health` returns `"status":"ok"`.
+
+### Google Maps API key (required for standalone builds)
+
+A standalone APK crashed on Android with `IllegalStateException: API key not found … com.google.android.geo.API_KEY` when the map first mounted (Expo Go bundles its own key; an APK does not). The key is read from `EXPO_PUBLIC_GOOGLE_MAPS_API_KEY` by `app.config.js` — nothing is hardcoded and no secret is committed:
+
+1. Google Cloud Console → create/select a project → enable **Maps SDK for Android**.
+2. Create an **API key**, then restrict it: *Application restrictions → Android apps*, package name `com.priyanshubhatt.ecorouter`, plus your signing key's SHA-1 fingerprint (EAS shows it under the build details page → "Android keystore"; use the release certificate SHA-1).
+3. Give the key to the build (never the repo): `eas env:create --name EXPO_PUBLIC_GOOGLE_MAPS_API_KEY --value <YOUR_KEY> --environment production --type string` (link projects via `--project <your-project-id>` if asked). If you use a non-default EAS environment for the preview profile, add `--environment preview` instead and set `"environment"` in the profile.
+4. Rebuild and reinstall: `eas build -p android --profile preview`.
+5. First launch requires location permission (a foreground-only prompt; no background location is requested).
+
+Build:
+
+- `eas build -p android --profile preview`
+- Optional pre-check that no env files reach the builder: `npx eas build:inspect --profile preview -p android --stage archive --output <existing-folder>` (confirm no `.env*` inside before real builds).
+
+Download & install:
+
+1. When the build finishes, the terminal prints a build page link (also on https://expo.dev under your project → Builds).
+2. Open the APK install link on your Android phone (Chrome can scan/QR from the build page) and allow the unknown-source prompt, or download the `.apk` from the build page and copy/`adb install` it.
+3. First launch requires location permission (a foreground-only prompt; no background location is requested).
+
 ## Tests
 
 - Backend (from `backend/`): `.\ecorouter\Scripts\python.exe -m pytest -q`

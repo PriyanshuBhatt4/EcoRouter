@@ -16,16 +16,27 @@
       "supportsTablet": true
     },
     "android": {
+      "package": "com.priyanshubhatt.ecorouter",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
-      }
+      },
+      "permissions": [
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-asset"
-    ]
+      "expo-asset",
+      "expo-location"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "8b1d24bb-df05-4b4d-bc74-e39194d7cb1f"
+      }
+    }
   }
 }
